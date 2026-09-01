@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "download_url": "https://raw.githubusercontent.com/castinio/litecast/main/LiteCast.exe",
+  "installer_url": "https://raw.githubusercontent.com/castinio/litecast/main/LiteCast-Setup.exe",
+  "release_notes": "LiteCast 1.0.0 Kararlı Sürüm - Windows 11 DWM, Dosya Gezgini, Terminal Koşturucu, Dönüştürücüler, Dev Araçları ve Otomatik Güncelleyici.",
+  "mandatory": false,
+  "published_at": "2026-09-01T17:35:00Z"
+}

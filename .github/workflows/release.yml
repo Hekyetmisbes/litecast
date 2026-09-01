@@ -1,0 +1,50 @@
+name: Build & Release LiteCast
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build LiteCast (Release)
+        run: |
+          cargo build --release --bin litecast
+          Copy-Item target/release/litecast.exe -Destination ./LiteCast.exe -Force
+          cargo build --release --bin installer
+          Copy-Item target/release/installer.exe -Destination ./LiteCast-Setup.exe -Force
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: litecast-binaries
+          path: |
+            LiteCast.exe
+            LiteCast-Setup.exe
+            version.json
+
+      - name: Publish GitHub Release (On tag push)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            LiteCast.exe
+            LiteCast-Setup.exe
+            version.json
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
