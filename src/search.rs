@@ -42,6 +42,11 @@ pub enum ResultAction {
     FocusWindow {
         hwnd_val: isize,
     },
+    ExecutePlugin {
+        script_path: String,
+        ext: String,
+        args: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

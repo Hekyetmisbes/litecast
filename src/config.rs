@@ -106,14 +106,20 @@ pub struct AppConfig {
     pub update_url: String,
     #[serde(default = "default_auto_update")]
     pub auto_update: bool,
+    #[serde(default = "default_enable_clipboard_history")]
+    pub enable_clipboard_history: bool,
+}
+
+fn default_enable_clipboard_history() -> bool {
+    false // LC-019: Pano geçmişi varsayılan olarak kapalı (kullanıcı rızası & gizlilik odaklı)
 }
 
 fn default_auto_update() -> bool {
-    true
+    false
 }
 
 fn default_update_url() -> String {
-    "https://raw.githubusercontent.com/castinio/litecast/main/version.json".to_string()
+    "https://raw.githubusercontent.com/Hekyetmisbes/litecast/main/version.json".to_string()
 }
 
 fn default_opacity() -> u8 {
@@ -157,7 +163,8 @@ impl Default for AppConfig {
             custom_aliases: default_aliases(),
             custom_snippets: default_snippets(),
             update_url: default_update_url(),
-            auto_update: true,
+            auto_update: false,
+            enable_clipboard_history: false,
         }
     }
 }

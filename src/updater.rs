@@ -16,7 +16,37 @@ use crate::telemetry_local::{log_error, log_info};
 
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const DEFAULT_UPDATE_URL: &str =
-    "https://raw.githubusercontent.com/castinio/litecast/main/version.json";
+    "https://raw.githubusercontent.com/Hekyetmisbes/litecast/main/version.json";
+
+pub fn is_trusted_update_url(url: &str) -> bool {
+    let u = url.trim();
+    if !u.starts_with("https://") {
+        return false;
+    }
+    u.starts_with("https://raw.githubusercontent.com/Hekyetmisbes/litecast/")
+        || u.starts_with("https://github.com/Hekyetmisbes/litecast/releases/download/")
+}
+
+pub fn verify_pe_binary_header(bytes: &[u8]) -> Result<(), String> {
+    if bytes.len() < 1024 {
+        return Err("Dosya boyutu geçerli bir PE dosyası için çok küçük.".into());
+    }
+    // Check DOS magic 'MZ'
+    if bytes[0] != b'M' || bytes[1] != b'Z' {
+        return Err("Geçersiz çalıştırılabilir dosya: DOS başlığı (MZ) bulunamadı.".into());
+    }
+    // e_lfanew offset is at bytes 0x3C..0x40 (little endian)
+    let pe_offset =
+        u32::from_le_bytes([bytes[0x3C], bytes[0x3D], bytes[0x3E], bytes[0x3F]]) as usize;
+    if pe_offset + 4 > bytes.len() {
+        return Err("Geçersiz PE başlık ofseti.".into());
+    }
+    // Check PE signature 'PE\0\0'
+    if bytes[pe_offset..pe_offset + 4] != [b'P', b'E', 0, 0] {
+        return Err("Geçersiz PE imzası.".into());
+    }
+    Ok(())
+}
 
 #[link(name = "urlmon")]
 unsafe extern "system" {
@@ -131,6 +161,13 @@ pub fn download_file_native(url: &str, dest_path: &Path) -> Result<(), String> {
 
 /// Check remote server / website for new version.
 pub fn check_for_updates(update_url: &str) -> Result<Option<VersionInfo>, String> {
+    if !is_trusted_update_url(update_url) {
+        return Err(format!(
+            "Güvensiz güncelleme kaynağı reddedildi: {}",
+            update_url
+        ));
+    }
+
     let temp_dir = get_app_storage_dir();
     let _ = fs::create_dir_all(&temp_dir);
     let version_file = temp_dir.join("remote_version.json");
@@ -154,8 +191,32 @@ pub fn check_for_updates(update_url: &str) -> Result<Option<VersionInfo>, String
     }
 }
 
-/// Downloads the updated binary and executes a hot-swap replacement of the running executable.
+/// Downloads the updated binary and executes a secure, verified, atomic hot-swap replacement.
 pub fn download_and_apply_update(info: &VersionInfo) -> Result<(), String> {
+    // 1. Version monotonicity check (anti-downgrade)
+    if !is_newer_version(&info.version, CURRENT_VERSION) {
+        return Err(format!(
+            "Güncelleme reddedildi: v{} sürümü mevcut v{} sürümünden daha yeni değil (downgrade engellendi).",
+            info.version, CURRENT_VERSION
+        ));
+    }
+
+    // 2. Validate URL domain trust
+    if !is_trusted_update_url(&info.download_url) {
+        return Err(format!(
+            "Güvensiz güncelleme adresi reddedildi: {}",
+            info.download_url
+        ));
+    }
+
+    // 3. Mandatory SHA-256 requirement
+    let expected_sha256 = match &info.sha256 {
+        Some(h) if !h.trim().is_empty() => h.trim().to_lowercase(),
+        _ => {
+            return Err("Güncelleme reddedildi: Sürüm metadatasında zorunlu SHA-256 hash bilgisi bulunamadı.".into());
+        }
+    };
+
     let storage_dir = get_app_storage_dir();
     let pending_exe = storage_dir.join("update_pending.exe");
 
@@ -167,7 +228,26 @@ pub fn download_and_apply_update(info: &VersionInfo) -> Result<(), String> {
     ));
     download_file_native(&info.download_url, &pending_exe)?;
 
-    // Hot-swap the running executable
+    // 4. Read downloaded file and verify SHA-256 hash
+    let downloaded_bytes = fs::read(&pending_exe)
+        .map_err(|e| format!("İndirilen güncelleme dosyası okunamadı: {}", e))?;
+    let calculated_hash = crate::dev_tools::sha256_hex(&downloaded_bytes).to_lowercase();
+
+    if calculated_hash != expected_sha256 {
+        let _ = fs::remove_file(&pending_exe);
+        return Err(format!(
+            "SHA-256 hash doğrulaması başarısız! İndirilen dosya bozuk veya değiştirilmiş olabilir. (Beklenen: {}, Hesaplanan: {})",
+            expected_sha256, calculated_hash
+        ));
+    }
+
+    // 5. Verify PE executable structure
+    if let Err(e) = verify_pe_binary_header(&downloaded_bytes) {
+        let _ = fs::remove_file(&pending_exe);
+        return Err(format!("PE ikili doğrulama hatası: {}", e));
+    }
+
+    // 6. Atomic staged swap with instant rollback
     let current_exe =
         std::env::current_exe().map_err(|e| format!("Mevcut uygulama konumu alınamadı: {}", e))?;
 
@@ -184,12 +264,16 @@ pub fn download_and_apply_update(info: &VersionInfo) -> Result<(), String> {
     if let Err(e) = fs::copy(&pending_exe, &current_exe) {
         // Rollback
         let _ = fs::rename(&old_exe, &current_exe);
-        return Err(format!("Yeni sürüm kopyalanamadı: {}", e));
+        let _ = fs::remove_file(&pending_exe);
+        return Err(format!(
+            "Yeni sürüm kopyalanamadı, eski sürüme geri dönüldü: {}",
+            e
+        ));
     }
 
     let _ = fs::remove_file(&pending_exe);
     log_info(&format!(
-        "Successfully updated LiteCast to v{}",
+        "Successfully verified and updated LiteCast to v{}",
         info.version
     ));
 

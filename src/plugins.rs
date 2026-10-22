@@ -90,7 +90,7 @@ pub fn search_plugins(input: &str) -> Vec<SearchResult> {
 
     let mut results = Vec::new();
 
-    // Look for matching script in plugins directory
+    // Look for matching script in plugins directory (Static discovery only, never execute on typing!)
     if let Ok(entries) = fs::read_dir(&plugins_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -109,37 +109,44 @@ pub fn search_plugins(input: &str) -> Vec<SearchResult> {
                 .unwrap_or("")
                 .to_lowercase();
 
-            let matches_plugin = query_payload.to_lowercase().starts_with(&file_stem);
+            if !["ps1", "bat", "cmd", "py", "exe"].contains(&ext.as_str()) {
+                continue;
+            }
+
+            let matches_plugin = query_payload.is_empty()
+                || query_payload.to_lowercase().starts_with(&file_stem)
+                || file_stem.contains(&query_payload.to_lowercase());
+
             if matches_plugin {
-                let script_args = query_payload[file_stem.len()..].trim();
-                let output_items = execute_plugin_script(&path, &ext, script_args);
+                let script_args = if query_payload.to_lowercase().starts_with(&file_stem) {
+                    query_payload[file_stem.len()..].trim().to_string()
+                } else {
+                    String::new()
+                };
 
-                for (idx, item) in output_items.into_iter().enumerate() {
-                    let action = match item.action.as_str() {
-                        "open" => ResultAction::OpenUrl {
-                            url: item.value.clone(),
-                        },
-                        "launch" => ResultAction::LaunchApp {
-                            target: item.value.clone(),
-                            args: None,
-                            item_id: format!("plugin_{}_{}", file_stem, idx),
-                        },
-                        _ => ResultAction::CopyToClipboard {
-                            text: item.value.clone(),
-                            notify_msg: format!("Kopyalandı: {}", item.value),
-                        },
-                    };
+                let display_args = if script_args.is_empty() {
+                    String::new()
+                } else {
+                    format!(" \"{}\"", script_args)
+                };
 
-                    results.push(SearchResult {
-                        id: format!("plugin_{}_{}", file_stem, idx),
-                        title: item.title,
-                        subtitle: item.subtitle,
-                        badge: item.badge,
-                        score: 9_100 - idx as i32,
-                        action,
-                        color_preview: None,
-                    });
-                }
+                results.push(SearchResult {
+                    id: format!("plugin_{}", file_stem),
+                    title: format!("🔌 {} ({})", file_stem, ext.to_uppercase()),
+                    subtitle: format!(
+                        "Eklentiyi çalıştır{}: {}  •  Enter ile çalıştırın",
+                        display_args,
+                        path.display()
+                    ),
+                    badge: "Eklenti".to_string(),
+                    score: 9_100,
+                    action: ResultAction::ExecutePlugin {
+                        script_path: path.to_string_lossy().to_string(),
+                        ext: ext.clone(),
+                        args: script_args,
+                    },
+                    color_preview: None,
+                });
             }
         }
     }
@@ -147,28 +154,70 @@ pub fn search_plugins(input: &str) -> Vec<SearchResult> {
     results
 }
 
-fn execute_plugin_script(script_path: &Path, ext: &str, args: &str) -> Vec<PluginOutputItem> {
+/// Executes a plugin action explicitly triggered by user confirmation (Enter key).
+pub fn run_plugin_action(script_path_str: &str, ext: &str, args: &str) {
+    let script_path = PathBuf::from(script_path_str);
+    let plugins_dir = get_plugins_dir();
+
+    // Path traversal verification
+    let is_valid = match (script_path.canonicalize(), plugins_dir.canonicalize()) {
+        (Ok(can_script), Ok(can_plugins)) => can_script.starts_with(&can_plugins),
+        _ => true,
+    };
+    if !is_valid {
+        crate::telemetry_local::log_error(
+            "Eklenti yolu güvenlik ihlali: Eklenti klasörü dışında dosya.",
+        );
+        return;
+    }
+
+    let items = execute_plugin_script(&script_path, ext, args);
+    if let Some(first) = items.first() {
+        match first.action.as_str() {
+            "open" => {
+                let _ = crate::platform_windows::launch_target(&first.value, None);
+            }
+            "launch" => {
+                let _ = crate::platform_windows::launch_target(&first.value, None);
+            }
+            _ => {
+                let _ = crate::clipboard::set_clipboard_text(&first.value);
+            }
+        }
+    }
+}
+
+pub fn execute_plugin_script(script_path: &Path, ext: &str, args: &str) -> Vec<PluginOutputItem> {
     let mut cmd = match ext {
         "bat" | "cmd" => {
             let mut c = Command::new("cmd.exe");
-            c.args(["/C", &script_path.to_string_lossy(), args]);
+            c.args(["/C", &script_path.to_string_lossy()]);
+            if !args.is_empty() {
+                c.arg(args);
+            }
             c
         }
         "ps1" => {
             let mut c = Command::new("powershell.exe");
             c.args([
                 "-NoProfile",
+                "-NonInteractive",
                 "-ExecutionPolicy",
-                "Bypass",
+                "RemoteSigned", // LC-016: Secure RemoteSigned instead of Bypass
                 "-File",
                 &script_path.to_string_lossy(),
-                args,
             ]);
+            if !args.is_empty() {
+                c.arg(args);
+            }
             c
         }
         "py" => {
             let mut c = Command::new("python");
-            c.args([script_path.to_string_lossy().as_ref(), args]);
+            c.arg(script_path);
+            if !args.is_empty() {
+                c.arg(args);
+            }
             c
         }
         "exe" => {
@@ -183,23 +232,46 @@ fn execute_plugin_script(script_path: &Path, ext: &str, args: &str) -> Vec<Plugi
 
     cmd.creation_flags(CREATE_NO_WINDOW);
 
-    if let Ok(output) = cmd.output()
-        && output.status.success()
-    {
-        let stdout_str = String::from_utf8_lossy(&output.stdout);
-        if let Ok(items) = serde_json::from_str::<Vec<PluginOutputItem>>(&stdout_str) {
-            return items;
+    // LC-017: Execution timeout (5s) and bounded memory output (64 KB)
+    if let Ok(mut child) = cmd.stdout(std::process::Stdio::piped()).spawn() {
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(5);
+        let mut finished = false;
+
+        while start.elapsed() < timeout {
+            if let Ok(Some(_status)) = child.try_wait() {
+                finished = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        // Fallback plain text output
-        let line = stdout_str.trim();
-        if !line.is_empty() {
-            return vec![PluginOutputItem {
-                title: line.to_string(),
-                subtitle: "Betik çıktısı  •  Enter ile kopyalayın".to_string(),
-                badge: "Eklenti".to_string(),
-                action: "copy".to_string(),
-                value: line.to_string(),
-            }];
+
+        if !finished {
+            let _ = child.kill();
+            crate::telemetry_local::log_error("Eklenti çalışma süresi aşıldı (5s zaman aşımı).");
+            return Vec::new();
+        }
+
+        if let Some(mut stdout) = child.stdout.take() {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let _ = stdout.by_ref().take(64 * 1024).read_to_end(&mut buf);
+            let stdout_str = String::from_utf8_lossy(&buf);
+
+            if let Ok(items) = serde_json::from_str::<Vec<PluginOutputItem>>(&stdout_str) {
+                return items;
+            }
+
+            let line = stdout_str.trim();
+            if !line.is_empty() {
+                return vec![PluginOutputItem {
+                    title: line.to_string(),
+                    subtitle: "Betik çıktısı  •  Panoya kopyalandı".to_string(),
+                    badge: "Eklenti".to_string(),
+                    action: "copy".to_string(),
+                    value: line.to_string(),
+                }];
+            }
         }
     }
 

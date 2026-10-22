@@ -49,7 +49,14 @@ impl AppIndex {
     }
 
     pub fn rebuild() -> Self {
-        let items = discover_applications();
+        Self::rebuild_with_progress(|_, _, _| {})
+    }
+
+    pub fn rebuild_with_progress<F>(on_progress: F) -> Self
+    where
+        F: FnMut(f32, &str, usize),
+    {
+        let items = discover_applications_with_progress(on_progress);
         let index = Self { items };
         index.save();
         index
@@ -64,39 +71,54 @@ impl AppIndex {
 }
 
 pub fn discover_applications() -> Vec<AppItem> {
+    discover_applications_with_progress(|_, _, _| {})
+}
+
+pub fn discover_applications_with_progress<F>(mut on_progress: F) -> Vec<AppItem>
+where
+    F: FnMut(f32, &str, usize),
+{
     let mut apps = Vec::new();
 
     // 1. Built-in Windows System Tools
+    on_progress(0.08, "Sistem araçları taranıyor...", apps.len());
     add_system_tools(&mut apps);
 
     // 2. Windows StartApps & Microsoft Store / UWP Applications (ChatGPT, Terminal, WhatsApp, etc.)
+    on_progress(
+        0.20,
+        "Windows Start & Mağaza uygulamaları taranıyor...",
+        apps.len(),
+    );
     add_start_apps(&mut apps);
 
     // 3. Steam Games & Libraries
+    on_progress(0.35, "Steam oyun kütüphaneleri taranıyor...", apps.len());
     add_steam_games(&mut apps);
 
-    // 4. Epic Games Store Games
+    // 4. Epic Games Store & Game Launchers
+    on_progress(
+        0.48,
+        "Epic, Riot ve oyun kütüphaneleri taranıyor...",
+        apps.len(),
+    );
     add_epic_games(&mut apps);
-
-    // 5. Riot Games (VALORANT, League of Legends, etc.)
     add_riot_games(&mut apps);
-
-    // 6. Xbox Games & PC Game Pass
     add_xbox_games(&mut apps);
-
-    // 7. GOG Galaxy Games
     add_gog_games(&mut apps);
-
-    // 8. Ubisoft Connect Games
     add_ubisoft_games(&mut apps);
-
-    // 9. Custom Game Directories (D:\Oyunlar, C:\Games, D:\Games, etc.)
     add_custom_games_folders(&mut apps);
 
     // 10. Windows Registry Installed Software & Games
+    on_progress(
+        0.68,
+        "Windows Kayıt Defteri (Registry) taranıyor...",
+        apps.len(),
+    );
     add_registry_installed_apps(&mut apps);
 
     // 11. Known directories to scan for .lnk / .url / .exe
+    on_progress(0.82, "Başlat Menüsü ve Masaüstü taranıyor...", apps.len());
     let mut search_dirs = Vec::new();
 
     if let Ok(app_data) = std::env::var("APPDATA") {
@@ -122,13 +144,11 @@ pub fn discover_applications() -> Vec<AppItem> {
         }
     }
 
-    // 12. Ensure fallback entries for common modern apps if not found
-    ensure_default_apps(&mut apps);
-
-    // 13. Filter out junk and uninstaller entries
+    // 12. Filter out junk and uninstaller entries
     apps.retain(|a| !is_junk_app(&a.name));
 
     // Deduplicate by lowercased name, preferring items with launcher URIs / clean targets
+    on_progress(0.95, "Yinelenen kayıtlar optimize ediliyor...", apps.len());
     apps.sort_by(|a, b| {
         a.name
             .to_lowercase()
@@ -136,6 +156,8 @@ pub fn discover_applications() -> Vec<AppItem> {
             .then_with(|| a.id.cmp(&b.id))
     });
     apps.dedup_by(|a, b| a.name.eq_ignore_ascii_case(&b.name));
+
+    on_progress(1.00, "İndeksleme tamamlandı!", apps.len());
     apps
 }
 
@@ -500,23 +522,15 @@ pub fn add_riot_games(apps: &mut Vec<AppItem>) {
                     _ => product_id,
                 };
 
-                let target_path = if let Some(ref rc) = riot_client_exe {
-                    rc.clone()
-                } else {
-                    format!(
-                        "riotclient:--launch-product={}&--launch-patchline=live",
-                        product_id
-                    )
+                let Some(ref rc) = riot_client_exe else {
+                    continue;
                 };
 
-                let arguments = if riot_client_exe.is_some() {
-                    Some(format!(
-                        "--launch-product={} --launch-patchline=live",
-                        product_id
-                    ))
-                } else {
-                    None
-                };
+                let target_path = rc.clone();
+                let arguments = Some(format!(
+                    "--launch-product={} --launch-patchline=live",
+                    product_id
+                ));
 
                 apps.push(AppItem {
                     id: format!("riot_{}", product_id),
@@ -991,110 +1005,6 @@ fn add_system_tools(apps: &mut Vec<AppItem>) {
     }
 }
 
-fn ensure_default_apps(apps: &mut Vec<AppItem>) {
-    let has_pc_manager = apps.iter().any(|a| {
-        a.name.to_lowercase().contains("pc manager") || a.id.to_lowercase().contains("pcmanager")
-    });
-    if !has_pc_manager {
-        apps.push(AppItem {
-            id: "app_pcmanager".into(),
-            name: "PC Manager".into(),
-            target_path: "shell:AppsFolder\\Microsoft.MicrosoftPCManager_8wekyb3d8bbwe!App".into(),
-            arguments: None,
-            source_path: "uwp:MicrosoftPCManager".into(),
-        });
-    }
-
-    let has_ms_store = apps.iter().any(|a| {
-        a.name.to_lowercase().contains("microsoft store") || a.name.to_lowercase() == "store"
-    });
-    if !has_ms_store {
-        apps.push(AppItem {
-            id: "app_msstore".into(),
-            name: "Microsoft Store".into(),
-            target_path: "shell:AppsFolder\\Microsoft.WindowsStore_8wekyb3d8bbwe!App".into(),
-            arguments: None,
-            source_path: "uwp:MicrosoftStore".into(),
-        });
-    }
-
-    let has_chatgpt = apps.iter().any(|a| {
-        a.name.to_lowercase().contains("chatgpt") || a.name.to_lowercase().contains("openai")
-    });
-    if !has_chatgpt {
-        apps.push(AppItem {
-            id: "app_chatgpt".into(),
-            name: "ChatGPT".into(),
-            target_path: "shell:AppsFolder\\OpenAI.Codex_2p2nqsd0c76g0!App".into(),
-            arguments: None,
-            source_path: "uwp:ChatGPT".into(),
-        });
-    }
-
-    let has_youtube = apps
-        .iter()
-        .any(|a| a.name.to_lowercase().contains("youtube"));
-    if !has_youtube {
-        apps.push(AppItem {
-            id: "app_youtube".into(),
-            name: "YouTube".into(),
-            target_path: "https://www.youtube.com".into(),
-            arguments: None,
-            source_path: "web:youtube".into(),
-        });
-    }
-
-    let has_spotify = apps
-        .iter()
-        .any(|a| a.name.to_lowercase().contains("spotify"));
-    if !has_spotify {
-        apps.push(AppItem {
-            id: "app_spotify".into(),
-            name: "Spotify".into(),
-            target_path: "spotify:".into(),
-            arguments: None,
-            source_path: "protocol:spotify".into(),
-        });
-    }
-
-    let has_steam = apps.iter().any(|a| a.name.to_lowercase().contains("steam"));
-    if !has_steam {
-        apps.push(AppItem {
-            id: "app_steam".into(),
-            name: "Steam".into(),
-            target_path: "steam:".into(),
-            arguments: None,
-            source_path: "protocol:steam".into(),
-        });
-    }
-
-    let has_discord = apps
-        .iter()
-        .any(|a| a.name.to_lowercase().contains("discord"));
-    if !has_discord {
-        apps.push(AppItem {
-            id: "app_discord".into(),
-            name: "Discord".into(),
-            target_path: "discord:".into(),
-            arguments: None,
-            source_path: "protocol:discord".into(),
-        });
-    }
-
-    let has_github = apps
-        .iter()
-        .any(|a| a.name.to_lowercase().contains("github"));
-    if !has_github {
-        apps.push(AppItem {
-            id: "app_github".into(),
-            name: "GitHub".into(),
-            target_path: "https://github.com".into(),
-            arguments: None,
-            source_path: "web:github".into(),
-        });
-    }
-}
-
 fn scan_dir_for_apps(dir: &PathBuf, apps: &mut Vec<AppItem>, depth: usize) {
     if depth > 6 {
         return;
@@ -1176,15 +1086,12 @@ mod tests {
         assert!(
             names
                 .iter()
-                .any(|n| n.contains("chatgpt") || n.contains("openai"))
+                .any(|n| n.contains("task manager") || n.contains("görev yöneticisi"))
         );
-        assert!(names.iter().any(|n| n.contains("youtube")));
-        assert!(names.iter().any(|n| n.contains("spotify")));
-        assert!(names.iter().any(|n| n.contains("pc manager")));
         assert!(
             names
                 .iter()
-                .any(|n| n.contains("store") || n.contains("microsoft store"))
+                .any(|n| n.contains("notepad") || n.contains("not defteri"))
         );
     }
 

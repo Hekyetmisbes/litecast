@@ -7,7 +7,7 @@
 [![Memory: < 40MB](https://img.shields.io/badge/RAM-~25--40%20MB-success)](#)
 [![Response: < 50ms](https://img.shields.io/badge/Response-%3C%2050ms-brightgreen)](#)
 [![License: MIT / Apache 2.0](https://img.shields.io/badge/License-MIT%20%2F%20Apache%202.0-blue)](#)
-[![Version: 1.0.0](https://img.shields.io/badge/Version-1.0.0-purple)](#)
+[![Version: 1.0.1](https://img.shields.io/badge/Version-1.0.1-purple)](#)
 
 ---
 
@@ -136,17 +136,17 @@ LiteCast, özellikle web tabanlı hantal araçlara kıyasla olağanüstü kaynak
 * **RAM:** 50 MB boş bellek
 
 ### Seçenek 1: Kurulum Dosyası (Önerilen)
-1. **[LiteCast-Setup.exe](https://raw.githubusercontent.com/castinio/litecast/main/LiteCast-Setup.exe)** dosyasını indirin.
+1. **[LiteCast-Setup.exe](https://github.com/Hekyetmisbes/litecast/releases/download/v1.0.1/LiteCast-Setup.exe)** dosyasını indirin.
 2. Kurulumu tamamlayın; LiteCast sistem tepsisine yerleşecek ve `Alt + Space` ile anında kullanıma hazır olacaktır.
 
 ### Seçenek 2: Taşınabilir Sürüm (Portable)
-1. **[LiteCast.exe](https://raw.githubusercontent.com/castinio/litecast/main/LiteCast.exe)** dosyasını indirin.
+1. **[LiteCast.exe](https://github.com/Hekyetmisbes/litecast/releases/download/v1.0.1/LiteCast.exe)** dosyasını indirin.
 2. İstediğiniz bir klasöre yerleştirip doğrudan çalıştırın.
 
 ### Seçenek 3: Kaynak Koddan Derleme
 ```powershell
 # Depoyu klonlayın
-git clone https://github.com/castinio/litecast.git
+git clone https://github.com/Hekyetmisbes/litecast.git
 cd litecast
 
 # Optimize edilmiş release sürümünü derleyin

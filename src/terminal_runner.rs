@@ -47,16 +47,14 @@ pub fn parse_terminal_command(input: &str) -> Vec<SearchResult> {
     let mut results = Vec::new();
 
     let (target_bin, default_args, elev_args) = match shell_type {
-        ShellType::Cmd => (
-            "cmd.exe",
-            format!("/k \"{}\"", cmd_str),
-            format!("/k \"{}\"", cmd_str),
-        ),
-        ShellType::PowerShell => (
-            "powershell.exe",
-            format!("-NoExit -Command \"{}\"", cmd_str),
-            format!("-NoExit -Command \"{}\"", cmd_str),
-        ),
+        ShellType::Cmd => {
+            let arg = escape_cmd_arg(cmd_str);
+            ("cmd.exe", arg.clone(), arg)
+        }
+        ShellType::PowerShell => {
+            let arg = escape_powershell_arg(cmd_str);
+            ("powershell.exe", arg.clone(), arg)
+        }
     };
 
     // Primary: Normal Terminal Execution
@@ -83,7 +81,7 @@ pub fn parse_terminal_command(input: &str) -> Vec<SearchResult> {
         id: format!("term_admin_{}", cmd_str),
         title: format!("🛡️ Yönetici Olarak Çalıştır: {}", cmd_str),
         subtitle: format!(
-            "{} {}  •  Yönetici ayrıcalıkları ile",
+            "{} {}  •  Yönetici ayrıcalıkları ile (UAC onayı gerektirir)",
             target_bin, elev_args
         ),
         badge: "Yönetici".to_string(),
@@ -97,6 +95,15 @@ pub fn parse_terminal_command(input: &str) -> Vec<SearchResult> {
     });
 
     results
+}
+
+pub fn escape_cmd_arg(cmd: &str) -> String {
+    format!("/k {}", cmd.trim())
+}
+
+pub fn escape_powershell_arg(cmd: &str) -> String {
+    let escaped = cmd.trim().replace('"', "`\"");
+    format!("-NoExit -Command \"{}\"", escaped)
 }
 
 #[cfg(test)]
@@ -113,5 +120,15 @@ mod tests {
         let ps_results = parse_terminal_command("$ Get-Service");
         assert_eq!(ps_results.len(), 2);
         assert_eq!(ps_results[0].badge, "PowerShell");
+    }
+
+    #[test]
+    fn test_escape_quoting() {
+        let cmd = "echo \"hello world\"";
+        let escaped_ps = escape_powershell_arg(cmd);
+        assert_eq!(escaped_ps, "-NoExit -Command \"echo `\"hello world`\"\"");
+
+        let escaped_cmd = escape_cmd_arg(cmd);
+        assert_eq!(escaped_cmd, "/k echo \"hello world\"");
     }
 }

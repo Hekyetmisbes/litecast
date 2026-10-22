@@ -3,20 +3,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreateSolidBrush,
-    DT_CENTER, DT_LEFT, DT_NOPREFIX, DT_VCENTER, DeleteDC, DeleteObject, DrawTextW, EndPaint,
-    FONT_CLIP_PRECISION, FONT_OUTPUT_PRECISION, FONT_QUALITY, FillRect, HDC, HFONT, InvalidateRect,
-    PAINTSTRUCT, SRCCOPY, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    DT_CENTER, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject, DrawTextW,
+    EndPaint, FONT_CLIP_PRECISION, FONT_OUTPUT_PRECISION, FONT_QUALITY, FillRect, HDC, HFONT,
+    InvalidateRect, PAINTSTRUCT, SRCCOPY, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DI_NORMAL, DefWindowProcW, DispatchMessageW,
-    DrawIconEx, GetMessageW, IDC_ARROW, IDC_HAND, LoadCursorW, MSG, PostQuitMessage,
-    RegisterClassExW, SW_HIDE, SW_RESTORE, SW_SHOW, SetCursor, SetForegroundWindow, SetWindowPos,
-    ShowWindow, TranslateMessage, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY,
-    WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP, WM_SYSCOMMAND, WNDCLASSEXW, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    DrawIconEx, GetMessageW, HWND_TOPMOST, IDC_ARROW, IDC_HAND, LoadCursorW, MSG, PostQuitMessage,
+    RegisterClassExW, SW_HIDE, SetCursor, SetWindowPos, ShowWindow, TranslateMessage, WM_ACTIVATE,
+    WM_CHAR, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_KILLFOCUS,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_PAINT, WM_RBUTTONUP, WM_SYSCOMMAND, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -27,11 +25,11 @@ use crate::config::{AppConfig, rgb};
 use crate::history::UsageHistory;
 use crate::indexer::AppIndex;
 use crate::platform_windows::{
-    HOTKEY_ID, IDM_OPEN_LAUNCHER, IDM_OPEN_SETTINGS, IDM_QUIT, IDM_REINDEX, WM_TOGGLE_LAUNCHER,
-    WM_TRAYICON, add_tray_icon, apply_modern_window_styling, center_window_on_active_monitor,
-    enable_dpi_awareness, get_app_icon, init_keyboard_hook, launch_target, launch_target_elevated,
-    register_configured_hotkey, remove_tray_icon, set_window_icons, set_window_opacity,
-    show_tray_menu, to_wide, unhook_keyboard_hook, unregister_hotkey,
+    HOTKEY_ID, IDM_OPEN_LAUNCHER, IDM_OPEN_SETTINGS, IDM_QUIT, WM_TOGGLE_LAUNCHER, WM_TRAYICON,
+    add_tray_icon, apply_modern_window_styling, center_window_on_active_monitor,
+    enable_dpi_awareness, force_foreground_window, get_app_icon, init_keyboard_hook, launch_target,
+    launch_target_elevated, register_configured_hotkey, remove_tray_icon, set_window_icons,
+    set_window_opacity, show_tray_menu, to_wide, unhook_keyboard_hook, unregister_hotkey,
 };
 use crate::search::{ResultAction, SearchResult, search_apps_with_history};
 use crate::settings_ui::{
@@ -171,6 +169,7 @@ pub struct UiState {
     pub action_menu_index: usize,
     pub index: AppIndex,
     pub history: UsageHistory,
+    pub toast_message: Option<(String, std::time::Instant)>,
 }
 
 pub static UI_STATE: Mutex<Option<UiState>> = Mutex::new(None);
@@ -178,6 +177,7 @@ pub static SHOULD_QUIT: AtomicBool = AtomicBool::new(false);
 
 pub fn update_launcher_index(new_index: AppIndex) {
     let config = AppConfig::load();
+    let count = new_index.items.len();
     let mut state_guard = UI_STATE.lock().unwrap();
     if let Some(state) = state_guard.as_mut() {
         state.index = new_index;
@@ -190,6 +190,17 @@ pub fn update_launcher_index(new_index: AppIndex) {
         );
         state.selected_index = 0;
         state.scroll_offset = 0;
+        state.toast_message = Some((
+            format!("✅ İndeksleme tamamlandı • {} hazır", count),
+            std::time::Instant::now(),
+        ));
+    }
+
+    if let Some(lh_val) = *LAUNCHER_HWND.lock().unwrap() {
+        let lh = HWND(lh_val as *mut _);
+        unsafe {
+            let _ = InvalidateRect(Some(lh), None, false);
+        }
     }
 }
 
@@ -319,6 +330,7 @@ pub fn run_ui() {
                 action_menu_index: 0,
                 index,
                 history,
+                toast_message: None,
             });
         }
 
@@ -395,10 +407,6 @@ unsafe extern "system" fn wnd_proc(
                                 show_settings_window(HWND(h as *mut _));
                             }
                         }
-                        IDM_REINDEX => {
-                            let new_index = AppIndex::rebuild();
-                            update_launcher_index(new_index);
-                        }
                         IDM_QUIT => {
                             unsafe {
                                 let _ = ShowWindow(hwnd, SW_HIDE);
@@ -452,6 +460,19 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_ERASEBKGND => LRESULT(1),
+        WM_MOUSEACTIVATE => {
+            force_foreground_window(hwnd);
+            LRESULT(windows::Win32::UI::WindowsAndMessaging::MA_ACTIVATE as isize)
+        }
+        WM_ACTIVATE => {
+            let state = (wparam.0 & 0xffff) as u32;
+            if state == windows::Win32::UI::WindowsAndMessaging::WA_INACTIVE {
+                unsafe {
+                    let _ = ShowWindow(hwnd, SW_HIDE);
+                }
+            }
+            LRESULT(0)
+        }
         WM_KILLFOCUS => {
             unsafe {
                 let _ = ShowWindow(hwnd, SW_HIDE);
@@ -477,7 +498,8 @@ unsafe extern "system" fn wnd_proc(
 pub fn toggle_window(hwnd: HWND) {
     unsafe {
         let is_visible = windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(hwnd).as_bool();
-        if is_visible {
+        let foreground = windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow();
+        if is_visible && foreground == hwnd {
             let _ = ShowWindow(hwnd, SW_HIDE);
         } else {
             show_window(hwnd);
@@ -515,12 +537,7 @@ pub fn show_window(hwnd: HWND) {
 
         let height = calculate_current_height();
         center_window_on_active_monitor(hwnd, WINDOW_WIDTH, height);
-        let _ = ShowWindow(hwnd, SW_SHOW);
-        let _ = ShowWindow(hwnd, SW_RESTORE);
-        let _ = windows::Win32::UI::WindowsAndMessaging::BringWindowToTop(hwnd);
-        let _ = SetForegroundWindow(hwnd);
-        let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetActiveWindow(hwnd);
-        let _ = SetFocus(Some(hwnd));
+        force_foreground_window(hwnd);
         let _ = InvalidateRect(Some(hwnd), None, false);
     }
 }
@@ -670,6 +687,19 @@ fn execute_result_action(action: &ResultAction, history: &mut UsageHistory) {
             log_info(&format!("Focusing window: {}", hwnd_val));
             crate::window_switcher::focus_window(*hwnd_val);
         }
+        ResultAction::ExecutePlugin {
+            script_path,
+            ext,
+            args,
+        } => {
+            log_info(&format!("Executing plugin: {}", script_path));
+            let sp = script_path.clone();
+            let e = ext.clone();
+            let a = args.clone();
+            std::thread::spawn(move || {
+                crate::plugins::run_plugin_action(&sp, &e, &a);
+            });
+        }
     }
 }
 
@@ -710,6 +740,8 @@ fn handle_mouse_click(hwnd: HWND, x: i32, y: i32) {
         unsafe {
             let _ = ShowWindow(hwnd, SW_HIDE);
         }
+    } else {
+        force_foreground_window(hwnd);
     }
 
     if open_settings {
@@ -1018,6 +1050,7 @@ fn handle_keydown(hwnd: HWND, vk: u32) {
                                 }
                                 CommandAction::Reindex => {
                                     state.index = AppIndex::rebuild();
+                                    let count = state.index.items.len();
                                     state.results = search_apps_with_history(
                                         &state.index.items,
                                         &state.query,
@@ -1027,6 +1060,10 @@ fn handle_keydown(hwnd: HWND, vk: u32) {
                                     );
                                     state.selected_index = 0;
                                     state.scroll_offset = 0;
+                                    state.toast_message = Some((
+                                        format!("✅ İndeksleme tamamlandı • {} hazır", count),
+                                        std::time::Instant::now(),
+                                    ));
                                     need_resize = true;
                                     need_repaint = true;
                                 }
@@ -1092,13 +1129,12 @@ fn handle_keydown(hwnd: HWND, vk: u32) {
         unsafe {
             let _ = SetWindowPos(
                 hwnd,
-                Some(HWND::default()),
+                Some(HWND_TOPMOST),
                 0,
                 0,
                 WINDOW_WIDTH,
                 height,
                 windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE
-                    | windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER
                     | windows::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE,
             );
         }
@@ -1151,13 +1187,12 @@ fn handle_char(hwnd: HWND, ch: char) {
         unsafe {
             let _ = SetWindowPos(
                 hwnd,
-                Some(HWND::default()),
+                Some(HWND_TOPMOST),
                 0,
                 0,
                 WINDOW_WIDTH,
                 height,
                 windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE
-                    | windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER
                     | windows::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE,
             );
         }
@@ -1278,6 +1313,18 @@ unsafe fn paint_search_view(
         let _ = DrawIconEx(hdc, 20, 23, app_icon, 28, 28, 0, None, DI_NORMAL);
     }
 
+    let is_toast_active = if let Some((_, created_at)) = &state.toast_message {
+        created_at.elapsed().as_secs() < 5
+    } else {
+        false
+    };
+
+    let search_right_bound = if is_toast_active {
+        width - 370
+    } else {
+        width - 70
+    };
+
     // Search Input Field
     if state.query.is_empty() {
         unsafe {
@@ -1288,7 +1335,7 @@ unsafe fn paint_search_view(
             "Uygulama, dosya (C:\\), komut (>), dönüştürücü (100km to mi), Tab: Eylemler...",
             62,
             16,
-            width - 70,
+            search_right_bound,
             58,
             DT_LEFT | DT_VCENTER,
         );
@@ -1301,7 +1348,7 @@ unsafe fn paint_search_view(
             &state.query,
             62,
             16,
-            width - 70,
+            search_right_bound,
             58,
             DT_LEFT | DT_VCENTER,
         );
@@ -1314,6 +1361,45 @@ unsafe fn paint_search_view(
         right: width - 18,
         bottom: 56,
     };
+
+    // In-App Toast Notification Pill (e.g. after Reindexing)
+    if is_toast_active && let Some((msg, _)) = &state.toast_message {
+        let toast_rect = RECT {
+            left: width - 360,
+            top: 20,
+            right: gear_rect.left - 10,
+            bottom: 54,
+        };
+        unsafe {
+            let b_brush = CreateSolidBrush(rgb(34, 197, 94));
+            FillRect(hdc, &toast_rect, b_brush);
+            let _ = DeleteObject(b_brush.into());
+
+            let inner_toast = RECT {
+                left: toast_rect.left + 1,
+                top: toast_rect.top + 1,
+                right: toast_rect.right - 1,
+                bottom: toast_rect.bottom - 1,
+            };
+            let in_brush = CreateSolidBrush(rgb(20, 36, 26));
+            FillRect(hdc, &inner_toast, in_brush);
+            let _ = DeleteObject(in_brush.into());
+
+            let hfont_toast = create_font(13, 600);
+            let _ = SelectObject(hdc, hfont_toast.into());
+            SetTextColor(hdc, rgb(74, 222, 128));
+            draw_text(
+                hdc,
+                msg,
+                inner_toast.left + 6,
+                inner_toast.top,
+                inner_toast.right - 6,
+                inner_toast.bottom,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            );
+            let _ = DeleteObject(hfont_toast.into());
+        }
+    }
     let gear_bg = if state.hovered_settings_btn {
         theme.primary_hover
     } else {

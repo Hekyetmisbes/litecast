@@ -35,12 +35,22 @@ pub enum SettingsTab {
     Guide = 3,
 }
 
+#[derive(Debug, Clone)]
+pub struct IndexingProgressState {
+    pub is_running: bool,
+    pub progress: f32, // 0.0 .. 1.0
+    pub stage: String,
+    pub count: usize,
+    pub completed: bool,
+}
+
 pub struct SettingsState {
     pub config: AppConfig,
     pub index_count: usize,
     pub last_action_msg: String,
     pub hovered_btn: Option<usize>,
     pub active_tab: SettingsTab,
+    pub indexing_progress: Option<IndexingProgressState>,
 }
 
 pub static SETTINGS_STATE: Mutex<Option<SettingsState>> = Mutex::new(None);
@@ -56,6 +66,7 @@ pub fn init_settings_state(index_count: usize) {
         last_action_msg: format!("Sistem hazır • {} uygulama indekslendi", index_count),
         hovered_btn: None,
         active_tab: SettingsTab::General,
+        indexing_progress: None,
     });
 }
 
@@ -216,16 +227,16 @@ fn get_button_at(x: i32, y: i32, width: i32, height: i32) -> Option<usize> {
     let start_x = 250;
     match active_tab {
         SettingsTab::General => {
-            if (start_x..=(start_x + 195)).contains(&x) && (120..=165).contains(&y) {
+            if (start_x..=(start_x + 195)).contains(&x) && (110..=155).contains(&y) {
                 return Some(100);
             }
-            if ((start_x + 207)..=(start_x + 402)).contains(&x) && (120..=165).contains(&y) {
+            if ((start_x + 207)..=(start_x + 402)).contains(&x) && (110..=155).contains(&y) {
                 return Some(101);
             }
-            if ((start_x + 414)..=(width - 30)).contains(&x) && (120..=165).contains(&y) {
+            if ((start_x + 414)..=(width - 30)).contains(&x) && (110..=155).contains(&y) {
                 return Some(102);
             }
-            if (start_x..=(width - 30)).contains(&x) && (220..=276).contains(&y) {
+            if (start_x..=(width - 30)).contains(&x) && (256..=310).contains(&y) {
                 return Some(300);
             }
         }
@@ -265,7 +276,7 @@ fn get_button_at(x: i32, y: i32, width: i32, height: i32) -> Option<usize> {
             for (i, _) in OPACITY_PRESETS.iter().enumerate() {
                 let left = start_x + (i as i32) * (op_w + op_gap);
                 let right = left + op_w;
-                if (left..=right).contains(&x) && (295..=340).contains(&y) {
+                if (left..=right).contains(&x) && (280..=325).contains(&y) {
                     return Some(500 + i);
                 }
             }
@@ -331,18 +342,100 @@ fn handle_lbutton_down(hwnd: HWND, x: i32, y: i32) {
                 }
             }
             101 => {
-                log_info("Settings: Reindexing applications");
-                let new_index = AppIndex::rebuild();
-                let count = new_index.items.len();
+                let already_running = {
+                    let guard = SETTINGS_STATE.lock().unwrap();
+                    guard
+                        .as_ref()
+                        .and_then(|s| s.indexing_progress.as_ref())
+                        .map(|p| p.is_running)
+                        .unwrap_or(false)
+                };
+
+                if already_running {
+                    log_info("Settings: Reindexing already in progress, ignoring duplicate click");
+                    return;
+                }
+
+                log_info("Settings: Starting asynchronous reindexing");
                 {
                     let mut guard = SETTINGS_STATE.lock().unwrap();
                     if let Some(state) = guard.as_mut() {
-                        state.index_count = count;
-                        state.last_action_msg =
-                            format!("Veritabanı yenilendi: {} uygulama hazır", count);
+                        state.indexing_progress = Some(IndexingProgressState {
+                            is_running: true,
+                            progress: 0.05,
+                            stage: "Tarama başlatılıyor...".to_string(),
+                            count: state.index_count,
+                            completed: false,
+                        });
+                        state.last_action_msg = "Veritabanı taranıyor...".to_string();
                     }
                 }
-                crate::ui::update_launcher_index(new_index);
+
+                unsafe {
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
+
+                let hwnd_raw = hwnd.0 as isize;
+                std::thread::spawn(move || {
+                    let new_index = AppIndex::rebuild_with_progress(|ratio, stage, count| {
+                        {
+                            let mut guard = SETTINGS_STATE.lock().unwrap();
+                            if let Some(state) = guard.as_mut() {
+                                state.indexing_progress = Some(IndexingProgressState {
+                                    is_running: true,
+                                    progress: ratio,
+                                    stage: stage.to_string(),
+                                    count,
+                                    completed: ratio >= 1.0,
+                                });
+                                state.last_action_msg = format!(
+                                    "Taranıyor (%{:.0}): {} ({} öğe)",
+                                    ratio * 100.0,
+                                    stage,
+                                    count
+                                );
+                            }
+                        }
+                        let h = HWND(hwnd_raw as *mut _);
+                        unsafe {
+                            let _ = InvalidateRect(Some(h), None, false);
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(60));
+                    });
+
+                    let count = new_index.items.len();
+                    {
+                        let mut guard = SETTINGS_STATE.lock().unwrap();
+                        if let Some(state) = guard.as_mut() {
+                            state.index_count = count;
+                            state.indexing_progress = Some(IndexingProgressState {
+                                is_running: false,
+                                progress: 1.0,
+                                stage: format!("İndeksleme tamamlandı! {} uygulama hazır.", count),
+                                count,
+                                completed: true,
+                            });
+                            state.last_action_msg =
+                                format!("Veritabanı yenilendi: {} uygulama hazır", count);
+                        }
+                    }
+
+                    crate::ui::update_launcher_index(new_index);
+
+                    if let Some(lh_val) = *LAUNCHER_HWND.lock().unwrap() {
+                        let lh = HWND(lh_val as *mut _);
+                        crate::platform_windows::show_tray_notification(
+                            lh,
+                            "LiteCast",
+                            &format!("İndeksleme tamamlandı • {} uygulama ve araç hazır", count),
+                        );
+                    }
+
+                    let h = HWND(hwnd_raw as *mut _);
+                    unsafe {
+                        let _ = InvalidateRect(Some(h), None, false);
+                    }
+                });
             }
             102 => {
                 log_info("Settings: Checking for updates");
@@ -612,10 +705,12 @@ unsafe fn paint_settings_window(hwnd: HWND) {
         let hfont_small = create_font(12, 400);
         let hfont_tab = create_font(14, 600);
         let hfont_title = create_font(20, 700);
-        let hfont_section = create_font(15, 600);
-        let hfont_body = create_font(13, 400);
+        let hfont_section = create_font(14, 700);
+        let hfont_body = create_font(12, 400);
         let hfont_bold = create_font(13, 600);
         let hfont_ctrl = create_font(15, 600);
+        let hfont_stat_val = create_font(22, 700);
+        let hfont_chip = create_font(11, 700);
 
         // Sidebar Brand Header
         let app_icon = get_app_icon(32);
@@ -632,7 +727,7 @@ unsafe fn paint_settings_window(hwnd: HWND) {
         }
         draw_text_str(
             mem_dc,
-            "v1.0.0 Kontrol Paneli",
+            "v1.0.1 Kontrol Paneli",
             54,
             46,
             210,
@@ -824,9 +919,9 @@ unsafe fn paint_settings_window(hwnd: HWND) {
                     mem_dc,
                     "Genel Ayarlar & Eylemler",
                     content_x,
-                    22,
+                    20,
                     width - 100,
-                    48,
+                    46,
                     DT_LEFT | DT_SINGLELINE,
                 );
 
@@ -838,9 +933,9 @@ unsafe fn paint_settings_window(hwnd: HWND) {
                     mem_dc,
                     "Uygulama başlatıcıyı kontrol edin ve sistem entegrasyonunu yönetin.",
                     content_x,
-                    50,
+                    48,
                     width - 100,
-                    72,
+                    70,
                     DT_LEFT | DT_SINGLELINE,
                 );
 
@@ -853,17 +948,17 @@ unsafe fn paint_settings_window(hwnd: HWND) {
                     mem_dc,
                     "HIZLI EYLEMLER",
                     content_x,
-                    90,
+                    84,
                     800,
-                    114,
+                    106,
                     DT_LEFT | DT_SINGLELINE,
                 );
 
                 let btn1_rect = RECT {
                     left: 250,
-                    top: 120,
+                    top: 110,
                     right: 445,
-                    bottom: 165,
+                    bottom: 155,
                 };
                 let btn1_hover = state.hovered_btn == Some(100);
                 let btn1_bg = if btn1_hover {
@@ -886,26 +981,65 @@ unsafe fn paint_settings_window(hwnd: HWND) {
                     DT_CENTER | DT_VCENTER | DT_SINGLELINE,
                 );
 
+                let is_indexing = state
+                    .indexing_progress
+                    .as_ref()
+                    .map(|p| p.is_running)
+                    .unwrap_or(false);
+                let is_completed = state
+                    .indexing_progress
+                    .as_ref()
+                    .map(|p| p.completed)
+                    .unwrap_or(false);
+
                 let btn2_rect = RECT {
                     left: 457,
-                    top: 120,
+                    top: 110,
                     right: 652,
-                    bottom: 165,
+                    bottom: 155,
                 };
-                let btn2_hover = state.hovered_btn == Some(101);
-                let btn2_bg = if btn2_hover {
+                let btn2_hover = state.hovered_btn == Some(101) && !is_indexing;
+                let btn2_bg = if is_indexing {
+                    rgb(36, 36, 44)
+                } else if is_completed {
+                    rgb(20, 48, 30)
+                } else if btn2_hover {
                     rgb(45, 45, 52)
                 } else {
                     rgb(32, 32, 38)
                 };
-                draw_rounded_card(mem_dc, &btn2_rect, btn2_bg, rgb(63, 63, 70));
+                let btn2_border = if is_indexing {
+                    theme.primary_border
+                } else if is_completed {
+                    rgb(34, 197, 94)
+                } else {
+                    rgb(63, 63, 70)
+                };
+                draw_rounded_card(mem_dc, &btn2_rect, btn2_bg, btn2_border);
                 unsafe {
-                    SetTextColor(mem_dc, rgb(228, 228, 231));
+                    if is_completed {
+                        SetTextColor(mem_dc, rgb(34, 197, 94));
+                    } else if is_indexing {
+                        SetTextColor(mem_dc, theme.primary_light);
+                    } else {
+                        SetTextColor(mem_dc, rgb(228, 228, 231));
+                    }
                     let _ = SelectObject(mem_dc, hfont_bold.into());
                 }
+                let btn2_label = if let Some(prog) = &state.indexing_progress {
+                    if prog.is_running {
+                        format!("⏳  Taranıyor (%{:.0})", prog.progress * 100.0)
+                    } else if prog.completed {
+                        format!("✅  Yenilendi ({})", state.index_count)
+                    } else {
+                        "🔄  İndeksi Yenile".to_string()
+                    }
+                } else {
+                    "🔄  İndeksi Yenile".to_string()
+                };
                 draw_text_str(
                     mem_dc,
-                    "🔄  İndeksi Yenile",
+                    &btn2_label,
                     btn2_rect.left,
                     btn2_rect.top,
                     btn2_rect.right,
@@ -915,9 +1049,9 @@ unsafe fn paint_settings_window(hwnd: HWND) {
 
                 let btn3_rect = RECT {
                     left: 664,
-                    top: 120,
+                    top: 110,
                     right: width - 30,
-                    bottom: 165,
+                    bottom: 155,
                 };
                 let btn3_hover = state.hovered_btn == Some(102);
                 let btn3_bg = if btn3_hover {
@@ -940,6 +1074,185 @@ unsafe fn paint_settings_window(hwnd: HWND) {
                     DT_CENTER | DT_VCENTER | DT_SINGLELINE,
                 );
 
+                // Progress Bar & Real-time Sync Card
+                let sync_card = RECT {
+                    left: 250,
+                    top: 168,
+                    right: width - 30,
+                    bottom: 224,
+                };
+
+                if let Some(prog) = &state.indexing_progress {
+                    if prog.is_running {
+                        draw_rounded_card(
+                            mem_dc,
+                            &sync_card,
+                            rgb(20, 22, 28),
+                            theme.primary_border,
+                        );
+
+                        // Top info line
+                        unsafe {
+                            let _ = SelectObject(mem_dc, hfont_bold.into());
+                            SetTextColor(mem_dc, theme.primary_light);
+                        }
+                        let pct = (prog.progress * 100.0) as u32;
+                        let progress_header =
+                            format!("🔄  İndeks Yenileniyor (%{}): {}", pct, prog.stage);
+                        draw_text_str(
+                            mem_dc,
+                            &progress_header,
+                            266,
+                            172,
+                            width - 170,
+                            192,
+                            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                        );
+
+                        // Badge on right
+                        let badge_rect = RECT {
+                            left: width - 160,
+                            top: 172,
+                            right: width - 42,
+                            bottom: 192,
+                        };
+                        draw_rounded_card(mem_dc, &badge_rect, rgb(32, 34, 44), rgb(54, 56, 68));
+                        unsafe {
+                            let _ = SelectObject(mem_dc, hfont_chip.into());
+                            SetTextColor(mem_dc, rgb(228, 228, 231));
+                        }
+                        let count_str = format!("{} Öğe Tespit Edildi", prog.count);
+                        draw_text_str(
+                            mem_dc,
+                            &count_str,
+                            badge_rect.left,
+                            badge_rect.top,
+                            badge_rect.right,
+                            badge_rect.bottom,
+                            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                        );
+
+                        // Progress track
+                        let track_rect = RECT {
+                            left: 266,
+                            top: 198,
+                            right: width - 42,
+                            bottom: 212,
+                        };
+                        let track_brush = unsafe { CreateSolidBrush(rgb(36, 36, 46)) };
+                        unsafe {
+                            FillRect(mem_dc, &track_rect, track_brush);
+                            let _ = DeleteObject(track_brush.into());
+                        }
+
+                        let track_w = track_rect.right - track_rect.left;
+                        let fill_w = ((track_w as f32) * prog.progress.clamp(0.04, 1.0)) as i32;
+                        let fill_rect = RECT {
+                            left: track_rect.left,
+                            top: track_rect.top,
+                            right: (track_rect.left + fill_w).min(track_rect.right),
+                            bottom: track_rect.bottom,
+                        };
+                        let fill_brush = unsafe { CreateSolidBrush(theme.primary) };
+                        unsafe {
+                            FillRect(mem_dc, &fill_rect, fill_brush);
+                            let _ = DeleteObject(fill_brush.into());
+                        }
+                    } else if prog.completed {
+                        draw_rounded_card(mem_dc, &sync_card, rgb(14, 32, 22), rgb(34, 197, 94));
+                        unsafe {
+                            let _ = SelectObject(mem_dc, hfont_bold.into());
+                            SetTextColor(mem_dc, rgb(34, 197, 94));
+                        }
+                        let done_header = format!(
+                            "✅  İndeks Başarıyla Yenilendi! Toplam {} uygulama ve oyun arama için hazırlandı.",
+                            prog.count
+                        );
+                        draw_text_str(
+                            mem_dc,
+                            &done_header,
+                            266,
+                            172,
+                            width - 170,
+                            192,
+                            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                        );
+
+                        let badge_rect = RECT {
+                            left: width - 160,
+                            top: 172,
+                            right: width - 42,
+                            bottom: 192,
+                        };
+                        draw_rounded_card(mem_dc, &badge_rect, rgb(18, 56, 34), rgb(34, 197, 94));
+                        unsafe {
+                            let _ = SelectObject(mem_dc, hfont_chip.into());
+                            SetTextColor(mem_dc, rgb(34, 197, 94));
+                        }
+                        draw_text_str(
+                            mem_dc,
+                            "Hazır & Kaydedildi",
+                            badge_rect.left,
+                            badge_rect.top,
+                            badge_rect.right,
+                            badge_rect.bottom,
+                            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                        );
+
+                        let track_rect = RECT {
+                            left: 266,
+                            top: 198,
+                            right: width - 42,
+                            bottom: 212,
+                        };
+                        let fill_brush = unsafe { CreateSolidBrush(rgb(34, 197, 94)) };
+                        unsafe {
+                            FillRect(mem_dc, &track_rect, fill_brush);
+                            let _ = DeleteObject(fill_brush.into());
+                        }
+                    }
+                } else {
+                    draw_rounded_card(mem_dc, &sync_card, rgb(20, 20, 26), rgb(38, 38, 48));
+                    unsafe {
+                        let _ = SelectObject(mem_dc, hfont_body.into());
+                        SetTextColor(mem_dc, rgb(212, 212, 216));
+                    }
+                    let idle_str = format!(
+                        "⚡  Veritabanı Senkronize  •  {} uygulama ve oyun kayıtlı (0ms anında arama devrede)",
+                        state.index_count
+                    );
+                    draw_text_str(
+                        mem_dc,
+                        &idle_str,
+                        266,
+                        168,
+                        width - 150,
+                        224,
+                        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                    );
+
+                    let badge_rect = RECT {
+                        left: width - 140,
+                        top: 182,
+                        right: width - 42,
+                        bottom: 210,
+                    };
+                    draw_rounded_card(mem_dc, &badge_rect, rgb(16, 44, 28), rgb(34, 197, 94));
+                    unsafe {
+                        let _ = SelectObject(mem_dc, hfont_chip.into());
+                        SetTextColor(mem_dc, rgb(34, 197, 94));
+                    }
+                    draw_text_str(
+                        mem_dc,
+                        "🟢  Aktif & Güncel",
+                        badge_rect.left,
+                        badge_rect.top,
+                        badge_rect.right,
+                        badge_rect.bottom,
+                        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                    );
+                }
+
                 // Section 2: Windows Başlangıç
                 unsafe {
                     let _ = SelectObject(mem_dc, hfont_section.into());
@@ -949,18 +1262,18 @@ unsafe fn paint_settings_window(hwnd: HWND) {
                     mem_dc,
                     "WINDOWS ENTEGRASYONU",
                     content_x,
-                    190,
+                    236,
                     800,
-                    212,
+                    256,
                     DT_LEFT | DT_SINGLELINE,
                 );
 
                 let auto_on = is_autostart_enabled();
                 let auto_card = RECT {
                     left: 250,
-                    top: 220,
+                    top: 260,
                     right: width - 30,
-                    bottom: 276,
+                    bottom: 312,
                 };
                 let auto_hover = state.hovered_btn == Some(300);
                 let auto_bg = if auto_hover {
@@ -995,17 +1308,17 @@ unsafe fn paint_settings_window(hwnd: HWND) {
                     mem_dc,
                     check_str,
                     270,
-                    220,
+                    260,
                     width - 130,
-                    276,
+                    312,
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE,
                 );
 
                 let badge_auto = RECT {
                     left: width - 120,
-                    top: 230,
+                    top: 270,
                     right: width - 42,
-                    bottom: 266,
+                    bottom: 302,
                 };
                 if auto_on {
                     draw_rounded_card(mem_dc, &badge_auto, rgb(16, 80, 48), rgb(34, 197, 94));
@@ -1039,15 +1352,7 @@ unsafe fn paint_settings_window(hwnd: HWND) {
                     );
                 }
 
-                // Section 3: Sistem Özeti
-                let summary_card = RECT {
-                    left: 250,
-                    top: 300,
-                    right: width - 30,
-                    bottom: height - 60,
-                };
-                draw_rounded_card(mem_dc, &summary_card, rgb(24, 24, 30), rgb(39, 39, 48));
-
+                // Section 3: Sistem Özeti (Modern 2x2 Metric Dashboard)
                 unsafe {
                     let _ = SelectObject(mem_dc, hfont_section.into());
                     SetTextColor(mem_dc, theme.primary_light);
@@ -1055,48 +1360,116 @@ unsafe fn paint_settings_window(hwnd: HWND) {
                 draw_text_str(
                     mem_dc,
                     "📊  SİSTEM VE ÇALIŞMA ZAMANI ÖZETİ",
-                    270,
-                    315,
-                    width - 50,
-                    340,
+                    content_x,
+                    324,
+                    800,
+                    344,
                     DT_LEFT | DT_SINGLELINE,
                 );
 
-                unsafe {
-                    let _ = SelectObject(mem_dc, hfont_body.into());
-                    SetTextColor(mem_dc, rgb(212, 212, 216));
-                }
-                let stat_1 = format!(
-                    "• Toplam İndekslenen Uygulama & Oyun: {} adet (0ms anında arama)",
-                    state.index_count
-                );
-                let stat_2 = format!(
-                    "• Global Tetikleme Kısayolu: {} (Düşük gecikmeli klavye kancası devrede)",
-                    state.config.hotkey_name()
-                );
-                let stat_3 = format!(
-                    "• Güncel Sürüm: v{} | Otomatik Güncelleme: {}",
-                    crate::updater::CURRENT_VERSION,
-                    if state.config.auto_update {
-                        "Açık"
-                    } else {
-                        "Kapalı"
+                let stat_cards = [
+                    (
+                        "📦  TOPLAM İNDEKSLENEN",
+                        format!("{} Adet", state.index_count),
+                        "⚡ 0ms Anında Arama Hazır".to_string(),
+                        true,
+                    ),
+                    (
+                        "⌨️  GLOBAL TETİKLEME",
+                        state.config.hotkey_name().to_string(),
+                        "🛡️ Düşük Gecikmeli Kanca".to_string(),
+                        false,
+                    ),
+                    (
+                        "🚀  UYGULAMA SÜRÜMÜ",
+                        format!("v{}", crate::updater::CURRENT_VERSION),
+                        if state.config.auto_update {
+                            "🔄 Otomatik Güncelleme: Açık".to_string()
+                        } else {
+                            "Otomatik Güncelleme: Kapalı".to_string()
+                        },
+                        false,
+                    ),
+                    (
+                        "🎨  GÖRÜNÜM VE TEMA",
+                        theme.name.to_string(),
+                        format!("%{} Saydamlık Derecesi", state.config.opacity_percent),
+                        false,
+                    ),
+                ];
+
+                for (idx, (cat, val, sub, is_accent)) in stat_cards.iter().enumerate() {
+                    let col = idx % 2;
+                    let row = idx / 2;
+                    let card_left = if col == 0 { 250 } else { 568 };
+                    let card_right = if col == 0 { 552 } else { width - 30 };
+                    let card_top = if row == 0 { 350 } else { 454 };
+                    let card_bottom = card_top + 94;
+
+                    let c_rect = RECT {
+                        left: card_left,
+                        top: card_top,
+                        right: card_right,
+                        bottom: card_bottom,
+                    };
+                    draw_rounded_card(mem_dc, &c_rect, rgb(24, 24, 30), rgb(42, 42, 52));
+
+                    // Category header
+                    unsafe {
+                        let _ = SelectObject(mem_dc, hfont_chip.into());
+                        SetTextColor(mem_dc, rgb(161, 161, 170));
                     }
-                );
-                let stat_4 = format!(
-                    "• Seçili Görünüm Teması: {} | Saydamlık: %{}",
-                    theme.name, state.config.opacity_percent
-                );
-                let stat_full = format!("{}\n{}\n{}\n{}", stat_1, stat_2, stat_3, stat_4);
-                draw_text_str(
-                    mem_dc,
-                    &stat_full,
-                    270,
-                    348,
-                    width - 50,
-                    height - 70,
-                    DT_LEFT | DT_WORDBREAK,
-                );
+                    draw_text_str(
+                        mem_dc,
+                        cat,
+                        card_left + 14,
+                        card_top + 10,
+                        card_right - 14,
+                        card_top + 26,
+                        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                    );
+
+                    // Big Value
+                    unsafe {
+                        let _ = SelectObject(mem_dc, hfont_stat_val.into());
+                        if *is_accent {
+                            SetTextColor(mem_dc, theme.primary_light);
+                        } else {
+                            SetTextColor(mem_dc, rgb(255, 255, 255));
+                        }
+                    }
+                    draw_text_str(
+                        mem_dc,
+                        val,
+                        card_left + 14,
+                        card_top + 28,
+                        card_right - 14,
+                        card_top + 62,
+                        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                    );
+
+                    // Subtitle Pill
+                    let pill_rect = RECT {
+                        left: card_left + 14,
+                        top: card_top + 65,
+                        right: card_right - 14,
+                        bottom: card_top + 87,
+                    };
+                    draw_rounded_card(mem_dc, &pill_rect, rgb(32, 34, 42), rgb(48, 50, 62));
+                    unsafe {
+                        let _ = SelectObject(mem_dc, hfont_small.into());
+                        SetTextColor(mem_dc, rgb(212, 212, 216));
+                    }
+                    draw_text_str(
+                        mem_dc,
+                        sub,
+                        pill_rect.left + 8,
+                        pill_rect.top,
+                        pill_rect.right - 8,
+                        pill_rect.bottom,
+                        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                    );
+                }
             }
             SettingsTab::Hotkeys => {
                 unsafe {
@@ -1557,14 +1930,7 @@ unsafe fn paint_settings_window(hwnd: HWND) {
                     );
                 }
 
-                // Live Preview Card
-                let prev_card = RECT {
-                    left: 250,
-                    top: 365,
-                    right: width - 30,
-                    bottom: height - 60,
-                };
-                draw_rounded_card(mem_dc, &prev_card, rgb(24, 24, 30), rgb(39, 39, 48));
+                // Live Preview Card (Section 3)
                 unsafe {
                     let _ = SelectObject(mem_dc, hfont_section.into());
                     SetTextColor(mem_dc, theme.primary_light);
@@ -1572,29 +1938,266 @@ unsafe fn paint_settings_window(hwnd: HWND) {
                 draw_text_str(
                     mem_dc,
                     "👁️  CANLI GÖRÜNÜM ÖNİZLEMESİ",
-                    270,
-                    380,
-                    width - 50,
-                    405,
+                    content_x,
+                    338,
+                    width - 240,
+                    360,
                     DT_LEFT | DT_SINGLELINE,
                 );
 
+                // Preview Info Badges on right
+                let badge_p1 = RECT {
+                    left: width - 230,
+                    top: 336,
+                    right: width - 130,
+                    bottom: 360,
+                };
+                draw_rounded_card(mem_dc, &badge_p1, rgb(30, 30, 38), rgb(50, 50, 62));
                 unsafe {
-                    let _ = SelectObject(mem_dc, hfont_body.into());
-                    SetTextColor(mem_dc, rgb(212, 212, 216));
+                    let _ = SelectObject(mem_dc, hfont_chip.into());
+                    SetTextColor(mem_dc, theme.primary_light);
                 }
-                let prev_info = format!(
-                    "Seçili Tema: {} | Saydamlık: %{}\nArama penceresi açıldığında arayüz renkleri ve pencere saydamlığı anında bu ayarlarla güncellenir.",
-                    theme.name, state.config.opacity_percent
-                );
                 draw_text_str(
                     mem_dc,
-                    &prev_info,
-                    270,
-                    415,
-                    width - 50,
-                    height - 70,
-                    DT_LEFT | DT_WORDBREAK,
+                    theme.name,
+                    badge_p1.left,
+                    badge_p1.top,
+                    badge_p1.right,
+                    badge_p1.bottom,
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                );
+
+                let badge_p2 = RECT {
+                    left: width - 120,
+                    top: 336,
+                    right: width - 30,
+                    bottom: 360,
+                };
+                draw_rounded_card(mem_dc, &badge_p2, rgb(30, 30, 38), rgb(50, 50, 62));
+                unsafe {
+                    let _ = SelectObject(mem_dc, hfont_chip.into());
+                    SetTextColor(mem_dc, rgb(212, 212, 216));
+                }
+                let op_str = format!("%{} Saydam", state.config.opacity_percent);
+                draw_text_str(
+                    mem_dc,
+                    &op_str,
+                    badge_p2.left,
+                    badge_p2.top,
+                    badge_p2.right,
+                    badge_p2.bottom,
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                );
+
+                // Miniature Launcher Window Preview Mockup Container
+                let prev_card = RECT {
+                    left: 250,
+                    top: 368,
+                    right: width - 30,
+                    bottom: 532,
+                };
+                draw_rounded_card(mem_dc, &prev_card, rgb(18, 18, 22), theme.primary_border);
+
+                // Mockup Search Input Bar
+                let mock_input_rect = RECT {
+                    left: 264,
+                    top: 378,
+                    right: width - 44,
+                    bottom: 416,
+                };
+                draw_rounded_card(mem_dc, &mock_input_rect, rgb(24, 24, 30), rgb(44, 44, 54));
+
+                unsafe {
+                    let _ = SelectObject(mem_dc, hfont_bold.into());
+                    SetTextColor(mem_dc, rgb(255, 255, 255));
+                }
+                draw_text_str(
+                    mem_dc,
+                    "🔍   steam",
+                    276,
+                    378,
+                    360,
+                    416,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                );
+
+                // Blinking-style cursor bar
+                let cur_brush = unsafe { CreateSolidBrush(theme.primary_light) };
+                let cur_rect = RECT {
+                    left: 362,
+                    top: 388,
+                    right: 364,
+                    bottom: 406,
+                };
+                unsafe {
+                    FillRect(mem_dc, &cur_rect, cur_brush);
+                    let _ = DeleteObject(cur_brush.into());
+                }
+
+                // Gear button on right of mock input
+                let mock_gear = RECT {
+                    left: width - 78,
+                    top: 384,
+                    right: width - 50,
+                    bottom: 410,
+                };
+                draw_rounded_card(mem_dc, &mock_gear, rgb(32, 32, 40), theme.primary_border);
+                unsafe {
+                    let _ = SelectObject(mem_dc, hfont_chip.into());
+                    SetTextColor(mem_dc, theme.primary_light);
+                }
+                draw_text_str(
+                    mem_dc,
+                    "⚙️",
+                    mock_gear.left,
+                    mock_gear.top,
+                    mock_gear.right,
+                    mock_gear.bottom,
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                );
+
+                // Divider line inside mockup
+                let mock_div = RECT {
+                    left: 264,
+                    top: 422,
+                    right: width - 44,
+                    bottom: 423,
+                };
+                let mock_div_brush = unsafe { CreateSolidBrush(rgb(40, 40, 48)) };
+                unsafe {
+                    FillRect(mem_dc, &mock_div, mock_div_brush);
+                    let _ = DeleteObject(mock_div_brush.into());
+                }
+
+                // Mockup Row 1: Selected Result (Highlighted in theme.primary)
+                let row1_rect = RECT {
+                    left: 264,
+                    top: 428,
+                    right: width - 44,
+                    bottom: 472,
+                };
+                draw_rounded_card(mem_dc, &row1_rect, theme.primary, theme.primary_border);
+
+                unsafe {
+                    let _ = SelectObject(mem_dc, hfont_bold.into());
+                    SetTextColor(mem_dc, theme.text_on_primary);
+                }
+                draw_text_str(
+                    mem_dc,
+                    "🎮  Steam",
+                    276,
+                    432,
+                    420,
+                    452,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                );
+                unsafe {
+                    let _ = SelectObject(mem_dc, hfont_small.into());
+                    SetTextColor(mem_dc, theme.text_on_primary);
+                }
+                draw_text_str(
+                    mem_dc,
+                    "C:\\Program Files (x86)\\Steam\\steam.exe",
+                    276,
+                    452,
+                    width - 130,
+                    468,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                );
+
+                // Row 1 Action Badge
+                let r1_badge = RECT {
+                    left: width - 126,
+                    top: 436,
+                    right: width - 52,
+                    bottom: 464,
+                };
+                draw_rounded_card(mem_dc, &r1_badge, rgb(16, 16, 20), rgb(48, 48, 56));
+                unsafe {
+                    let _ = SelectObject(mem_dc, hfont_chip.into());
+                    SetTextColor(mem_dc, rgb(255, 255, 255));
+                }
+                draw_text_str(
+                    mem_dc,
+                    "↵  Başlat",
+                    r1_badge.left,
+                    r1_badge.top,
+                    r1_badge.right,
+                    r1_badge.bottom,
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                );
+
+                // Mockup Row 2: Unselected Result
+                let row2_rect = RECT {
+                    left: 264,
+                    top: 478,
+                    right: width - 44,
+                    bottom: 522,
+                };
+                draw_rounded_card(mem_dc, &row2_rect, rgb(24, 24, 30), rgb(38, 38, 48));
+
+                unsafe {
+                    let _ = SelectObject(mem_dc, hfont_bold.into());
+                    SetTextColor(mem_dc, rgb(228, 228, 231));
+                }
+                draw_text_str(
+                    mem_dc,
+                    "⚡  Steam VR",
+                    276,
+                    482,
+                    420,
+                    502,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                );
+                unsafe {
+                    let _ = SelectObject(mem_dc, hfont_small.into());
+                    SetTextColor(mem_dc, rgb(161, 161, 170));
+                }
+                draw_text_str(
+                    mem_dc,
+                    "Sanal Gerçeklik Başlatıcı ve Kütüphane Yöneticisi",
+                    276,
+                    502,
+                    width - 140,
+                    518,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                );
+
+                // Row 2 Action Badge
+                let r2_badge = RECT {
+                    left: width - 138,
+                    top: 486,
+                    right: width - 52,
+                    bottom: 514,
+                };
+                draw_rounded_card(mem_dc, &r2_badge, rgb(30, 30, 38), rgb(44, 44, 54));
+                unsafe {
+                    let _ = SelectObject(mem_dc, hfont_chip.into());
+                    SetTextColor(mem_dc, rgb(161, 161, 170));
+                }
+                draw_text_str(
+                    mem_dc,
+                    "Tab: Eylemler",
+                    r2_badge.left,
+                    r2_badge.top,
+                    r2_badge.right,
+                    r2_badge.bottom,
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                );
+
+                // Bottom Help Line
+                unsafe {
+                    let _ = SelectObject(mem_dc, hfont_small.into());
+                    SetTextColor(mem_dc, rgb(140, 140, 150));
+                }
+                draw_text_str(
+                    mem_dc,
+                    "💡  Seçtiğiniz tema ve saydamlık ayarları, arama penceresi açıldığında anında canlı olarak uygulanır.",
+                    content_x,
+                    538,
+                    width - 30,
+                    556,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE,
                 );
             }
             SettingsTab::Guide => {
@@ -1606,9 +2209,9 @@ unsafe fn paint_settings_window(hwnd: HWND) {
                     mem_dc,
                     "Kılavuz, Komutlar & İpuçları",
                     content_x,
-                    22,
+                    20,
                     width - 100,
-                    48,
+                    46,
                     DT_LEFT | DT_SINGLELINE,
                 );
 
@@ -1618,54 +2221,141 @@ unsafe fn paint_settings_window(hwnd: HWND) {
                 }
                 draw_text_str(
                     mem_dc,
-                    "LiteCast'ten en yüksek verimi almak için pratik kullanım rehberi.",
+                    "LiteCast'ten en yüksek verimi almak için pratik kullanım rehberi ve kısayollar.",
                     content_x,
-                    50,
+                    48,
                     width - 100,
-                    72,
+                    70,
                     DT_LEFT | DT_SINGLELINE,
                 );
 
-                let guide_card = RECT {
-                    left: 250,
-                    top: 90,
-                    right: width - 30,
-                    bottom: height - 60,
-                };
-                draw_rounded_card(mem_dc, &guide_card, rgb(24, 24, 30), rgb(39, 39, 48));
+                let guide_cards = [
+                    (
+                        "📁  Dosya Gezgini",
+                        "C:\\  D:\\  ~/",
+                        "Disk ve klasör yollarını arama çubuğuna yazarak dosya ve klasörleri listeleyin, boyutlarını anında inceleyin.",
+                    ),
+                    (
+                        "💻  Terminal Runner",
+                        ">  $  cmd:  ps:",
+                        "Terminal açmadan > ping, $ git status veya powershell komutlarını doğrudan arama çubuğundan koşturun.",
+                    ),
+                    (
+                        "⚡  Hızlı Eylemler",
+                        "Tab  /  Ctrl+K",
+                        "Herhangi bir sonuç üzerindeyken eylem menüsünü açarak kopyalama, yönetici yetkisi ve konuma erişin.",
+                    ),
+                    (
+                        "🛡️  Yönetici Yetkisi",
+                        "Ctrl+Shift+↵",
+                        "Arama sonuçlarındaki uygulamaları tek tuşla Yönetici İzinleriyle (Run as Administrator) başlatın.",
+                    ),
+                    (
+                        "📂  Dosya Konumu",
+                        "Ctrl+E",
+                        "Seçili uygulamanın, oyunun veya dosyanın bulunduğu klasörü Windows Explorer'da seçili olarak açın.",
+                    ),
+                    (
+                        "📋  Pano Geçmişi",
+                        "cb  /  Ctrl+C",
+                        "cb yazarak son 50 pano geçmişini listeleyin; seçili öğenin dosya yolunu kopyalamak için Ctrl+C kullanın.",
+                    ),
+                    (
+                        "🧮  Hesap & Çevirici",
+                        "100 usd in try",
+                        "Döviz kurları, birim dönüşümleri (km to mi, kg to lbs), matematik formülleri ve unix zamanını hesaplayın.",
+                    ),
+                    (
+                        "🛠️  Geliştirici Araçları",
+                        "json / jwt / cron",
+                        "json formatlayıcı/küçültücü, jwt token çözücü, lorem ipsum üretici ve cron sözdizimini doğrudan test edin.",
+                    ),
+                ];
 
-                unsafe {
-                    let _ = SelectObject(mem_dc, hfont_section.into());
-                    SetTextColor(mem_dc, theme.primary_light);
-                }
-                draw_text_str(
-                    mem_dc,
-                    "🚀  LITECAST 1.0 SÜPER GÜÇLERİ & KULLANIM REHBERİ",
-                    270,
-                    105,
-                    width - 50,
-                    130,
-                    DT_LEFT | DT_SINGLELINE,
-                );
+                for (idx, (title, shortcut, desc)) in guide_cards.iter().enumerate() {
+                    let col = idx % 2;
+                    let row = idx / 2;
+                    let card_left = if col == 0 { 250 } else { 568 };
+                    let card_right = if col == 0 { 552 } else { width - 30 };
+                    let card_top = 80 + (row as i32) * 115;
+                    let card_bottom = card_top + 107;
 
-                unsafe {
-                    let _ = SelectObject(mem_dc, hfont_body.into());
-                    SetTextColor(mem_dc, rgb(228, 228, 231));
+                    let c_rect = RECT {
+                        left: card_left,
+                        top: card_top,
+                        right: card_right,
+                        bottom: card_bottom,
+                    };
+                    draw_rounded_card(mem_dc, &c_rect, rgb(24, 24, 30), rgb(42, 42, 52));
+
+                    // Header: Title + Shortcut Chip
+                    unsafe {
+                        let _ = SelectObject(mem_dc, hfont_bold.into());
+                        SetTextColor(mem_dc, rgb(255, 255, 255));
+                    }
+                    draw_text_str(
+                        mem_dc,
+                        title,
+                        card_left + 14,
+                        card_top + 10,
+                        card_right - 106,
+                        card_top + 32,
+                        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                    );
+
+                    let chip_rect = RECT {
+                        left: card_right - 104,
+                        top: card_top + 8,
+                        right: card_right - 12,
+                        bottom: card_top + 30,
+                    };
+                    draw_rounded_card(mem_dc, &chip_rect, rgb(32, 34, 44), theme.primary_border);
+                    unsafe {
+                        let _ = SelectObject(mem_dc, hfont_chip.into());
+                        SetTextColor(mem_dc, theme.primary_light);
+                    }
+                    draw_text_str(
+                        mem_dc,
+                        shortcut,
+                        chip_rect.left,
+                        chip_rect.top,
+                        chip_rect.right,
+                        chip_rect.bottom,
+                        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                    );
+
+                    // Inner divider
+                    let div_line = RECT {
+                        left: card_left + 14,
+                        top: card_top + 36,
+                        right: card_right - 14,
+                        bottom: card_top + 37,
+                    };
+                    let div_brush = unsafe { CreateSolidBrush(rgb(36, 36, 46)) };
+                    unsafe {
+                        FillRect(mem_dc, &div_line, div_brush);
+                        let _ = DeleteObject(div_brush.into());
+                    }
+
+                    // Description
+                    unsafe {
+                        let _ = SelectObject(mem_dc, hfont_body.into());
+                        SetTextColor(mem_dc, rgb(180, 180, 190));
+                    }
+                    draw_text_str(
+                        mem_dc,
+                        desc,
+                        card_left + 14,
+                        card_top + 42,
+                        card_right - 14,
+                        card_bottom - 6,
+                        DT_LEFT | DT_WORDBREAK,
+                    );
                 }
-                let guide_text = "✨ 8 SÜPER GÜÇ VE KLAVYE KISAYOLLARI:\n\n1. 📁 Dosya Gezgini: 'C:\\', 'D:\\', '%appdata%', '~/' yazarak dosya ve klasörleri listeleyin, boyuta göre inceleyin.\n2. 💻 Terminal Runner: '> ping google.com', '$ git status', 'cmd:' veya 'ps:' ile komut koşturun.\n3. ⚡ Hızlı Eylemler (Action Menu): Herhangi bir sonuçta 'Tab' veya 'Ctrl+K' basarak eylem menüsünü açın.\n4. 🛡️ Doğrudan Yönetici: Arama sonucunda 'Ctrl+Shift+Enter' basarak yönetici yetkileriyle başlatın.\n5. 📂 Dosya Konumu: 'Ctrl+E' basarak seçili uygulamanın/dosyanın klasörünü Windows Explorer'da seçili açın.\n6. 📋 Pano & Değer Kopyala: 'Ctrl+C' ile dosya yolunu kopyalayın; 'cb' yazarak son 50 pano geçmişini yönetin.\n7. 🧮 Hesaplama & Dönüştürücüler: '100 km to mi', '100 c to f', '5 kg to lbs', '100 usd in try', 'unix 1700000000'.\n8. 🛠️ Geliştirici Araçları: 'json {...}' (Format/Minify), 'jwt ey...' (Token çöz), 'lorem 3p', 'cron */15 * * * *'.";
-                draw_text_str(
-                    mem_dc,
-                    guide_text,
-                    270,
-                    138,
-                    width - 50,
-                    height - 70,
-                    DT_LEFT | DT_WORDBREAK,
-                );
             }
         }
 
-        // 6. Footer: Status Message
+        // 6. Footer: Status Message & Progress Feedback
         let footer_rect = RECT {
             left: 245,
             top: height - 48,
@@ -1673,23 +2363,92 @@ unsafe fn paint_settings_window(hwnd: HWND) {
             bottom: height - 16,
         };
         draw_rounded_card(mem_dc, &footer_rect, rgb(22, 22, 26), rgb(36, 36, 42));
-        unsafe {
-            let _ = SelectObject(mem_dc, hfont_small.into());
-            SetTextColor(mem_dc, rgb(161, 161, 170));
+
+        if let Some(prog) = &state.indexing_progress {
+            if prog.is_running {
+                unsafe {
+                    let _ = SelectObject(mem_dc, hfont_small.into());
+                    SetTextColor(mem_dc, theme.primary_light);
+                }
+                let pct = (prog.progress * 100.0) as u32;
+                let footer_prog_msg = format!(
+                    "🔄  İndeksleniyor (%{}): {} ({} öğe)",
+                    pct, prog.stage, prog.count
+                );
+                draw_text_str(
+                    mem_dc,
+                    &footer_prog_msg,
+                    260,
+                    height - 48,
+                    width - 180,
+                    height - 16,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                );
+
+                // Mini progress bar in footer
+                let mini_track = RECT {
+                    left: width - 170,
+                    top: height - 33,
+                    right: width - 30,
+                    bottom: height - 27,
+                };
+                let track_b = unsafe { CreateSolidBrush(rgb(36, 36, 46)) };
+                unsafe {
+                    FillRect(mem_dc, &mini_track, track_b);
+                    let _ = DeleteObject(track_b.into());
+                }
+
+                let mini_w = mini_track.right - mini_track.left;
+                let mini_fill = ((mini_w as f32) * prog.progress.clamp(0.05, 1.0)) as i32;
+                let mini_fill_rect = RECT {
+                    left: mini_track.left,
+                    top: mini_track.top,
+                    right: (mini_track.left + mini_fill).min(mini_track.right),
+                    bottom: mini_track.bottom,
+                };
+                let fill_b = unsafe { CreateSolidBrush(theme.primary) };
+                unsafe {
+                    FillRect(mem_dc, &mini_fill_rect, fill_b);
+                    let _ = DeleteObject(fill_b.into());
+                }
+            } else if prog.completed {
+                unsafe {
+                    let _ = SelectObject(mem_dc, hfont_small.into());
+                    SetTextColor(mem_dc, rgb(34, 197, 94));
+                }
+                let footer_done = format!(
+                    "✅  Veritabanı başarıyla yenilendi: {} uygulama hazır  •  Pencereyi kapatsanız bile kısayol arka planda çalışır.",
+                    prog.count
+                );
+                draw_text_str(
+                    mem_dc,
+                    &footer_done,
+                    260,
+                    height - 48,
+                    width - 30,
+                    height - 16,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                );
+            }
+        } else {
+            unsafe {
+                let _ = SelectObject(mem_dc, hfont_small.into());
+                SetTextColor(mem_dc, rgb(161, 161, 170));
+            }
+            let footer_msg = format!(
+                "Bilgi: {}  •  Pencereyi kapatsanız bile kısayol arka planda çalışır.",
+                state.last_action_msg
+            );
+            draw_text_str(
+                mem_dc,
+                &footer_msg,
+                260,
+                height - 48,
+                width - 30,
+                height - 16,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            );
         }
-        let footer_msg = format!(
-            "Bilgi: {}  •  Pencereyi kapatsanız bile kısayol arka planda çalışır.",
-            state.last_action_msg
-        );
-        draw_text_str(
-            mem_dc,
-            &footer_msg,
-            260,
-            height - 48,
-            width - 30,
-            height - 16,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-        );
 
         // Delete font objects
         unsafe {
@@ -1701,6 +2460,8 @@ unsafe fn paint_settings_window(hwnd: HWND) {
             let _ = DeleteObject(hfont_body.into());
             let _ = DeleteObject(hfont_bold.into());
             let _ = DeleteObject(hfont_ctrl.into());
+            let _ = DeleteObject(hfont_stat_val.into());
+            let _ = DeleteObject(hfont_chip.into());
         }
     }
 

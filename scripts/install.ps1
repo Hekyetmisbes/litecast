@@ -17,9 +17,13 @@ if (-not (Test-Path $SourcePath)) {
     Pop-Location
 }
 
-# Stop old instance before replacing binary
-Stop-Process -Name "litecast" -Force -ErrorAction SilentlyContinue
-Start-Sleep -Milliseconds 300
+# Stop old instance gracefully before replacing binary
+Get-Process -Name "litecast","LiteCast" -ErrorAction SilentlyContinue | ForEach-Object {
+    $_.CloseMainWindow() | Out-Null
+    Start-Sleep -Milliseconds 150
+    if (-not $_.HasExited) { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+}
+Start-Sleep -Milliseconds 200
 
 if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null

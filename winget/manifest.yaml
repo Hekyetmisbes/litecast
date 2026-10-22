@@ -1,22 +1,22 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.version.1.6.0.schema.json
 PackageIdentifier: LiteCast.LiteCast
-PackageVersion: 1.0.0
+PackageVersion: 1.0.1
 DefaultLocale: tr-TR
 ManifestType: version
 ManifestVersion: 1.6.0
 ---
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
 PackageIdentifier: LiteCast.LiteCast
-PackageVersion: 1.0.0
+PackageVersion: 1.0.1
 PackageLocale: tr-TR
 Publisher: LiteCast Team
-PublisherUrl: https://github.com/litecast/litecast
-PublisherSupportUrl: https://github.com/litecast/litecast/issues
+PublisherUrl: https://github.com/Hekyetmisbes/litecast
+PublisherSupportUrl: https://github.com/Hekyetmisbes/litecast/issues
 Author: LiteCast
 PackageName: LiteCast
-PackageUrl: https://github.com/litecast/litecast
+PackageUrl: https://github.com/Hekyetmisbes/litecast
 License: MIT / Apache-2.0
-LicenseUrl: https://github.com/litecast/litecast/blob/main/LICENSE
+LicenseUrl: https://github.com/Hekyetmisbes/litecast/blob/main/LICENSE-MIT
 Copyright: Copyright (c) 2026 LiteCast Team
 ShortDescription: Windows için ultra hızlı, hafif, yerel uygulama başlatıcı ve geliştirici araç takımı.
 Description: |
@@ -29,21 +29,21 @@ Tags:
   - raycast-alternative
   - windows-launcher
   - developer-tools
-ReleaseNotesUrl: https://github.com/litecast/litecast/releases/tag/v1.0.0
+ReleaseNotesUrl: https://github.com/Hekyetmisbes/litecast/releases/tag/v1.0.1
 ManifestType: defaultLocale
 ManifestVersion: 1.6.0
 ---
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
 PackageIdentifier: LiteCast.LiteCast
-PackageVersion: 1.0.0
+PackageVersion: 1.0.1
 InstallerType: exe
 InstallModes:
   - interactive
   - silent
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/litecast/litecast/releases/download/v1.0.0/LiteCast-Setup.exe
-    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+    InstallerUrl: https://github.com/Hekyetmisbes/litecast/releases/download/v1.0.1/LiteCast-Setup.exe
+    InstallerSha256: 8FD471838F5BF09E6FE64637F0E4244AB4DB2EC49D8A0A3E63C551F757EBB170
     InstallerSwitches:
       Silent: --silent
       SilentWithProgress: --silent

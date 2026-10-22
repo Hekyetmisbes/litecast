@@ -14,24 +14,25 @@ use windows::Win32::System::Registry::{
     HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_SZ, RegCloseKey, RegDeleteValueW,
     RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
 };
-use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::System::Threading::{AttachThreadInput, CreateMutexW, GetCurrentThreadId};
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, RegisterHotKey,
-    UnregisterHotKey, VK_CONTROL, VK_F2, VK_K, VK_MENU, VK_SPACE,
+    SetActiveWindow, SetFocus, UnregisterHotKey, VK_CONTROL, VK_F2, VK_K, VK_MENU, VK_SPACE,
 };
 use windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
-    ShellExecuteW,
+    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+    NOTIFYICONDATAW, Shell_NotifyIconW, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CallNextHookEx, CreatePopupMenu, DestroyMenu, FindWindowW, GWL_EXSTYLE,
-    GetCursorPos, GetWindowLongW, HHOOK, HICON, HWND_TOPMOST, ICON_BIG, ICON_SMALL,
-    IDI_APPLICATION, IMAGE_FLAGS, IMAGE_ICON, KBDLLHOOKSTRUCT, LR_DEFAULTCOLOR, LWA_ALPHA,
-    LoadIconW, LoadImageW, MF_SEPARATOR, MF_STRING, PostMessageW, SW_SHOWNORMAL, SWP_SHOWWINDOW,
-    SendMessageW, SetForegroundWindow, SetLayeredWindowAttributes, SetWindowLongW, SetWindowPos,
+    AppendMenuW, BringWindowToTop, CallNextHookEx, CreatePopupMenu, DestroyMenu, FindWindowW,
+    GWL_EXSTYLE, GetCursorPos, GetForegroundWindow, GetWindowLongW, GetWindowThreadProcessId,
+    HHOOK, HICON, HWND_TOPMOST, ICON_BIG, ICON_SMALL, IDI_APPLICATION, IMAGE_FLAGS, IMAGE_ICON,
+    KBDLLHOOKSTRUCT, LR_DEFAULTCOLOR, LWA_ALPHA, LoadIconW, LoadImageW, MF_SEPARATOR, MF_STRING,
+    PostMessageW, SW_SHOWNORMAL, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SendMessageW,
+    SetForegroundWindow, SetLayeredWindowAttributes, SetWindowLongW, SetWindowPos,
     SetWindowsHookExW, TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx,
     UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_SETICON, WM_SYSKEYDOWN, WS_EX_LAYERED,
 };
@@ -276,6 +277,31 @@ pub fn remove_tray_icon(hwnd: HWND) {
     }
 }
 
+pub fn show_tray_notification(hwnd: HWND, title: &str, message: &str) {
+    unsafe {
+        let mut nid = NOTIFYICONDATAW {
+            cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: hwnd,
+            uID: 1,
+            uFlags: NIF_INFO,
+            dwInfoFlags: NIIF_INFO,
+            ..Default::default()
+        };
+
+        let wide_title = to_wide(title);
+        for (i, &c) in wide_title.iter().take(63).enumerate() {
+            nid.szInfoTitle[i] = c;
+        }
+
+        let wide_msg = to_wide(message);
+        for (i, &c) in wide_msg.iter().take(255).enumerate() {
+            nid.szInfo[i] = c;
+        }
+
+        let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+    }
+}
+
 pub fn show_tray_menu(hwnd: HWND) -> u32 {
     unsafe {
         let mut pt = POINT::default();
@@ -293,12 +319,6 @@ pub fn show_tray_menu(hwnd: HWND) -> u32 {
             MF_STRING,
             IDM_OPEN_SETTINGS as usize,
             PCWSTR::from_raw(to_wide("⚙️ Kontrol Paneli & Ayarlar").as_ptr()),
-        );
-        let _ = AppendMenuW(
-            hmenu,
-            MF_STRING,
-            IDM_REINDEX as usize,
-            PCWSTR::from_raw(to_wide("🔄 Uygulamaları Yeniden Tara").as_ptr()),
         );
         let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(
@@ -350,6 +370,38 @@ pub fn center_window_on_active_monitor(hwnd: HWND, width: i32, height: i32) {
                 height,
                 SWP_SHOWWINDOW,
             );
+        }
+    }
+}
+
+pub fn force_foreground_window(hwnd: HWND) {
+    unsafe {
+        let foreground_hwnd = GetForegroundWindow();
+        let foreground_thread = GetWindowThreadProcessId(foreground_hwnd, None);
+        let current_thread = GetCurrentThreadId();
+
+        let attached = if foreground_thread != 0 && foreground_thread != current_thread {
+            AttachThreadInput(foreground_thread, current_thread, true).as_bool()
+        } else {
+            false
+        };
+
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+        );
+        let _ = BringWindowToTop(hwnd);
+        let _ = SetForegroundWindow(hwnd);
+        let _ = SetActiveWindow(hwnd);
+        let _ = SetFocus(Some(hwnd));
+
+        if attached {
+            let _ = AttachThreadInput(foreground_thread, current_thread, false);
         }
     }
 }
@@ -568,8 +620,8 @@ pub fn try_acquire_single_instance() -> Option<SingleInstanceGuard> {
                 if let Ok(hwnd) = FindWindowW(PCWSTR::from_raw(class_name.as_ptr()), PCWSTR::null())
                     && !hwnd.0.is_null()
                 {
+                    force_foreground_window(hwnd);
                     let _ = PostMessageW(Some(hwnd), WM_TOGGLE_LAUNCHER, WPARAM(0), LPARAM(0));
-                    let _ = SetForegroundWindow(hwnd);
                 }
                 let _ = CloseHandle(h);
                 return None;

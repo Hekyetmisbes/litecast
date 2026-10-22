@@ -19,13 +19,28 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+          components: rustfmt, clippy
 
-      - name: Build LiteCast (Release)
+      - name: Code Formatting Check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy Linter Check
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Automated Unit & Integration Tests
+        run: cargo test --all-targets
+
+      - name: Build LiteCast Binaries (Release)
         run: |
           cargo build --release --bin litecast
           Copy-Item target/release/litecast.exe -Destination ./LiteCast.exe -Force
           cargo build --release --bin installer
           Copy-Item target/release/installer.exe -Destination ./LiteCast-Setup.exe -Force
+
+      - name: Generate & Verify Checksums
+        run: |
+          Get-FileHash ./LiteCast.exe -Algorithm SHA256 | Format-List
+          Get-FileHash ./LiteCast-Setup.exe -Algorithm SHA256 | Format-List
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
@@ -36,8 +51,8 @@ jobs:
             LiteCast-Setup.exe
             version.json
 
-      - name: Publish GitHub Release (On tag push)
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Publish GitHub Release (On manual tag dispatch)
+        if: github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
         with:
           files: |

@@ -5,8 +5,12 @@
 
 $ErrorActionPreference = "SilentlyContinue"
 
-# Stop any running instances of litecast
-Stop-Process -Name "litecast" -Force -ErrorAction SilentlyContinue
+# Stop any running instances of litecast gracefully
+Get-Process -Name "litecast","LiteCast" -ErrorAction SilentlyContinue | ForEach-Object {
+    $_.CloseMainWindow() | Out-Null
+    Start-Sleep -Milliseconds 150
+    if (-not $_.HasExited) { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+}
 
 $InstallDir = "$env:LOCALAPPDATA\Programs\LiteCast"
 $DataDir = "$env:LOCALAPPDATA\LiteCast"
